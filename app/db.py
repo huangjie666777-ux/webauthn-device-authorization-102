@@ -59,6 +59,56 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_challenges_lookup
     ON challenges(username, operation, consumed);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+
+-- RFC 8628 device authorization requests.
+CREATE TABLE IF NOT EXISTS device_authorizations (
+    device_code_hash BLOB PRIMARY KEY,
+    user_code_hash BLOB NOT NULL UNIQUE,
+    user_code_display TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'denied')),
+    user_rowid INTEGER,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    last_poll_at INTEGER,
+    poll_interval_seconds INTEGER NOT NULL,
+    decided_at INTEGER,
+    revoked_at INTEGER,
+    FOREIGN KEY (user_rowid) REFERENCES users(rowid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_user_code
+    ON device_authorizations(user_code_hash);
+CREATE INDEX IF NOT EXISTS idx_device_user_grants
+    ON device_authorizations(user_rowid, status);
+
+-- Device access tokens: only a digest is stored, bound to the grant.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    token_hash BLOB PRIMARY KEY,
+    user_rowid INTEGER NOT NULL,
+    client_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    device_code_hash BLOB NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    FOREIGN KEY (user_rowid) REFERENCES users(rowid),
+    FOREIGN KEY (device_code_hash) REFERENCES device_authorizations(device_code_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_tokens_expiry ON device_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_rowid);
+
+-- Rate limiting for user_code guessing (lookup and decision endpoints).
+CREATE TABLE IF NOT EXISTS user_code_rate_hits (
+    source TEXT NOT NULL,
+    hit_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_code_rate
+    ON user_code_rate_hits(source, hit_at);
 """
 
 
