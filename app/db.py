@@ -56,9 +56,52 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (user_rowid) REFERENCES users(rowid)
 );
 
+CREATE TABLE IF NOT EXISTS device_authorizations (
+    device_code_hash BLOB PRIMARY KEY,
+    user_code TEXT NOT NULL UNIQUE,
+    client_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'approved', 'denied', 'consumed')),
+    user_rowid INTEGER,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    approved_at INTEGER,
+    interval_seconds INTEGER NOT NULL,
+    last_poll_at INTEGER NOT NULL,
+    FOREIGN KEY (user_rowid) REFERENCES users(rowid)
+);
+
+CREATE TABLE IF NOT EXISTS device_grants (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_rowid INTEGER NOT NULL,
+    client_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    token_hash BLOB NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    device_code_hash BLOB NOT NULL,
+    FOREIGN KEY (user_rowid) REFERENCES users(rowid)
+);
+
+CREATE TABLE IF NOT EXISTS user_code_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_code TEXT NOT NULL,
+    attempted_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_challenges_lookup
     ON challenges(username, operation, consumed);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_device_auth_user_code
+    ON device_authorizations(user_code);
+CREATE INDEX IF NOT EXISTS idx_device_auth_expiry
+    ON device_authorizations(expires_at);
+CREATE INDEX IF NOT EXISTS idx_device_grants_user
+    ON device_grants(user_rowid, revoked);
+CREATE INDEX IF NOT EXISTS idx_user_code_attempts
+    ON user_code_attempts(attempted_at);
 """
 
 

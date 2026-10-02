@@ -131,7 +131,10 @@ class AuthService:
             try:
                 user_rowid = repo.create_user(user_id, username)
                 repo.add_credential(
-                    attested.credential_id, user_rowid, attested.public_key_der
+                    attested.credential_id,
+                    user_rowid,
+                    attested.public_key_der,
+                    auth_data.sign_count,
                 )
             except UserExistsError as exc:
                 raise FinishError("user already registered", 409) from exc
@@ -248,6 +251,17 @@ class AuthService:
         }
 
     # ---- sessions ----
+
+    def session_identity(self, token: str) -> dict:
+        with transaction(self.conn) as c:
+            row = Repo(c).session_user(hash_token(token))
+        if row is None:
+            raise FinishError("login required", 401)
+        return {
+            "username": row["username"],
+            "userId": b64url_encode(row["user_id"]),
+            "user_rowid": int(row["rid"]),
+        }
 
     def whoami(self, token: str) -> dict:
         with transaction(self.conn) as c:

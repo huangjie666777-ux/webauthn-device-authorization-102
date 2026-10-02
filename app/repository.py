@@ -35,13 +35,17 @@ class Repo:
         return int(cur.lastrowid)
 
     def add_credential(
-        self, credential_id: bytes, user_rowid: int, public_key: bytes
+        self,
+        credential_id: bytes,
+        user_rowid: int,
+        public_key: bytes,
+        sign_count: int = 0,
     ) -> None:
         self.conn.execute(
             "INSERT INTO credentials "
             "(credential_id, user_rowid, public_key, sign_count, created_at) "
-            "VALUES (?, ?, ?, 0, ?)",
-            (credential_id, user_rowid, public_key, now_ms()),
+            "VALUES (?, ?, ?, ?, ?)",
+            (credential_id, user_rowid, public_key, sign_count, now_ms()),
         )
 
     def credential_belonging_to_user(
@@ -121,7 +125,7 @@ class Repo:
 
     def session_user(self, token_hash: bytes) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT u.username, u.id AS user_id, s.expires_at "
+            "SELECT u.rowid AS rid, u.username, u.id AS user_id, s.expires_at "
             "FROM sessions s JOIN users u ON u.rowid = s.user_rowid "
             "WHERE s.token_hash = ? AND s.expires_at > ?",
             (token_hash, now_ms()),
@@ -133,3 +137,152 @@ class Repo:
     def purge_expired(self) -> None:
         self.conn.execute("DELETE FROM challenges WHERE expires_at <= ?", (now_ms(),))
         self.conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now_ms(),))
+
+    # ---- OAuth 2.0 device authorization grant ----
+
+    def create_device_authorization(
+        self,
+        device_code_hash: bytes,
+        user_code: str,
+        client_id: str,
+        scope: str,
+        ttl_seconds: int,
+        interval_seconds: int,
+    ) -> None:
+        now = now_ms()
+        self.conn.execute(
+            "INSERT INTO device_authorizations "
+            "(device_code_hash, user_code, client_id, scope, status, "
+            " expires_at, created_at, interval_seconds, last_poll_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, 0)",
+            (
+                device_code_hash,
+                user_code,
+                client_id,
+                scope,
+                now + ttl_seconds * 1000,
+                now,
+                interval_seconds,
+            ),
+        )
+
+    def get_device_authorization_by_device_code(
+        self, device_code_hash: bytes
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM device_authorizations WHERE device_code_hash = ?",
+            (device_code_hash,),
+        ).fetchone()
+
+    def find_active_device_authorization_by_user_code(
+        self, user_code: str
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM device_authorizations "
+            "WHERE user_code = ? AND expires_at > ?",
+            (user_code, now_ms()),
+        ).fetchone()
+
+    def set_device_authorization_decision(
+        self,
+        user_code: str,
+        approved: bool,
+        user_rowid: int,
+    ) -> bool:
+        """Approve/deny only a pending, unexpired request. Terminal states win."""
+        status = "approved" if approved else "denied"
+        cur = self.conn.execute(
+            "UPDATE device_authorizations "
+            "SET status = ?, user_rowid = ?, approved_at = ? "
+            "WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+            (status, user_rowid, now_ms(), user_code, now_ms()),
+        )
+        return cur.rowcount == 1
+
+    def touch_poll(self, device_code_hash: bytes, interval_seconds: int) -> None:
+        self.conn.execute(
+            "UPDATE device_authorizations SET last_poll_at = ?, interval_seconds = ? "
+            "WHERE device_code_hash = ?",
+            (now_ms(), interval_seconds, device_code_hash),
+        )
+
+    def consume_device_authorization(self, device_code_hash: bytes) -> sqlite3.Row | None:
+        """Atomically flip approved -> consumed; only one poll can succeed."""
+        cur = self.conn.execute(
+            "UPDATE device_authorizations SET status = 'consumed' "
+            "WHERE device_code_hash = ? AND status = 'approved' "
+            "  AND expires_at > ? RETURNING device_code_hash, user_rowid, client_id, scope",
+            (device_code_hash, now_ms()),
+        )
+        return cur.fetchone()
+
+    def create_device_grant(
+        self,
+        user_rowid: int,
+        client_id: str,
+        scope: str,
+        token_hash: bytes,
+        device_code_hash: bytes,
+        ttl_seconds: int,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO device_grants "
+            "(user_rowid, client_id, scope, token_hash, expires_at, "
+            " created_at, revoked, device_code_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+            (
+                user_rowid,
+                client_id,
+                scope,
+                token_hash,
+                now_ms() + ttl_seconds * 1000,
+                now_ms(),
+                device_code_hash,
+            ),
+        )
+
+    def active_device_grant_for_token(self, token_hash: bytes) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT g.rowid AS rid, g.user_rowid, g.client_id, g.scope, "
+            "       u.username, u.id AS user_id, g.expires_at "
+            "FROM device_grants g JOIN users u ON u.rowid = g.user_rowid "
+            "WHERE g.token_hash = ? AND g.revoked = 0 AND g.expires_at > ?",
+            (token_hash, now_ms()),
+        ).fetchone()
+
+    def list_device_grants_for_user(self, user_rowid: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT rowid AS rid, client_id, scope, created_at, expires_at, revoked "
+                "FROM device_grants WHERE user_rowid = ? ORDER BY created_at DESC",
+                (user_rowid,),
+            )
+        )
+
+    def revoke_device_grant(self, grant_rowid: int, user_rowid: int) -> bool:
+        cur = self.conn.execute(
+            "UPDATE device_grants SET revoked = 1 "
+            "WHERE rowid = ? AND user_rowid = ?",
+            (grant_rowid, user_rowid),
+        )
+        return cur.rowcount == 1
+
+    def record_user_code_attempt(self, user_code: str) -> None:
+        self.conn.execute(
+            "INSERT INTO user_code_attempts (user_code, attempted_at) VALUES (?, ?)",
+            (user_code, now_ms()),
+        )
+
+    def count_user_code_attempts(self, user_code: str, window_seconds: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM user_code_attempts "
+            "WHERE user_code = ? AND attempted_at > ?",
+            (user_code, now_ms() - window_seconds * 1000),
+        ).fetchone()
+        return int(row["n"])
+
+    def purge_old_user_code_attempts(self, window_seconds: int) -> None:
+        self.conn.execute(
+            "DELETE FROM user_code_attempts WHERE attempted_at <= ?",
+            (now_ms() - window_seconds * 1000,),
+        )
