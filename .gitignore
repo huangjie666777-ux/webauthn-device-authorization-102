@@ -14,3 +14,5 @@ dist/
 *.db-*
 *.key
 *.pem
+demo/.tmp/
+demo/authenticator_state.json
